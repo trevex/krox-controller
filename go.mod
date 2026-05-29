@@ -3,6 +3,8 @@ module github.com/trevex/krox-controller
 go 1.26.0
 
 require (
+	github.com/fluxcd/pkg/apis/meta v1.25.1
+	github.com/fluxcd/source-controller/api v1.8.5
 	github.com/google/go-cmp v0.7.0
 	github.com/kubernetes-sigs/kro v0.9.2
 	github.com/onsi/ginkgo/v2 v2.27.5
@@ -26,6 +28,7 @@ require (
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
+	github.com/fluxcd/pkg/apis/acl v0.9.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
