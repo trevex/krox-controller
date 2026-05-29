@@ -71,14 +71,18 @@ spec:
                   artifact.
                 properties:
                   kind:
+                    description: Kind of Flux source CR (GitRepository or OCIRepository).
                     enum:
                     - GitRepository
                     - OCIRepository
                     type: string
                   name:
+                    description: Name of the source CR.
                     minLength: 1
                     type: string
                   namespace:
+                    description: Namespace of the source CR. Defaults to the parent
+                      KroxDeployment's namespace when empty.
                     type: string
                 required:
                 - kind
@@ -101,6 +105,8 @@ spec:
             description: KroxDeploymentStatus reports the last reconcile outcome.
             properties:
               conditions:
+                description: Conditions captures the current Ready / Reconciling /
+                  Stalled state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -157,19 +163,28 @@ spec:
                   type: object
                 type: array
               inventory:
-                description: ResourceInventory lists objects last applied by a KroxDeployment.
+                description: Inventory tracks the objects most recently applied; the
+                  controller diffs this against the new render to prune.
                 properties:
                   entries:
+                    description: Entries is the list of objects last applied by this
+                      KroxDeployment.
                     items:
-                      description: |-
-                        ResourceRef is a stable identifier for an applied object.
-                        ID = "<group>/<version>/<kind>/<namespace>/<name>"; cluster-scoped objects
-                        use an empty namespace component (e.g. "rbac.authorization.k8s.io/v1/ClusterRole//x");
-                        core group "" yields a leading slash (e.g. "/v1/ConfigMap/ns/x").
+                      description: ResourceRef is a stable identifier for an applied
+                        object.
                       properties:
                         id:
+                          description: |-
+                            ID = "<group>/<version>/<kind>/<namespace>/<name>".
+                            Cluster-scoped objects use an empty namespace component (e.g.
+                            "rbac.authorization.k8s.io/v1/ClusterRole//my-role"); core group ""
+                            yields a leading slash (e.g. "/v1/ConfigMap/apps/my-cm").
                           type: string
                         v:
+                          description: |-
+                            ResourceVersion observed at the time of last apply. Useful for drift
+                            detection and debugging; stored under the short JSON key "v" to keep
+                            the inventory compact.
                           type: string
                       required:
                       - id
@@ -180,10 +195,16 @@ spec:
                 - entries
                 type: object
               lastAppliedRevision:
+                description: LastAppliedRevision is the source artifact revision of
+                  the most recent SUCCESSFUL apply.
                 type: string
               lastAttemptedRevision:
+                description: LastAttemptedRevision is the source artifact revision
+                  of the most recent reconcile attempt, successful or not.
                 type: string
               observedGeneration:
+                description: ObservedGeneration is the .metadata.generation last reconciled
+                  by the controller.
                 format: int64
                 type: integer
             type: object

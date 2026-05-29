@@ -58,40 +58,53 @@ type KroxDeploymentSpec struct {
 
 // SourceReference identifies a Flux source CR.
 type SourceReference struct {
+	// Kind of Flux source CR (GitRepository or OCIRepository).
 	// +kubebuilder:validation:Enum=GitRepository;OCIRepository
 	Kind string `json:"kind"`
+	// Name of the source CR.
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+	// Namespace of the source CR. Defaults to the parent KroxDeployment's namespace when empty.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }
 
 // KroxDeploymentStatus reports the last reconcile outcome.
 type KroxDeploymentStatus struct {
+	// Conditions captures the current Ready / Reconciling / Stalled state.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// ObservedGeneration is the .metadata.generation last reconciled by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// LastAppliedRevision is the source artifact revision of the most recent SUCCESSFUL apply.
 	// +optional
 	LastAppliedRevision string `json:"lastAppliedRevision,omitempty"`
+	// LastAttemptedRevision is the source artifact revision of the most recent reconcile attempt, successful or not.
 	// +optional
 	LastAttemptedRevision string `json:"lastAttemptedRevision,omitempty"`
+	// Inventory tracks the objects most recently applied; the controller diffs this against the new render to prune.
 	// +optional
 	Inventory *ResourceInventory `json:"inventory,omitempty"`
 }
 
 // ResourceInventory lists objects last applied by a KroxDeployment.
 type ResourceInventory struct {
+	// Entries is the list of objects last applied by this KroxDeployment.
 	Entries []ResourceRef `json:"entries"`
 }
 
 // ResourceRef is a stable identifier for an applied object.
-// ID = "<group>/<version>/<kind>/<namespace>/<name>"; cluster-scoped objects
-// use an empty namespace component (e.g. "rbac.authorization.k8s.io/v1/ClusterRole//x");
-// core group "" yields a leading slash (e.g. "/v1/ConfigMap/ns/x").
 type ResourceRef struct {
-	ID      string `json:"id"`
-	Version string `json:"v"`
+	// ID = "<group>/<version>/<kind>/<namespace>/<name>".
+	// Cluster-scoped objects use an empty namespace component (e.g.
+	// "rbac.authorization.k8s.io/v1/ClusterRole//my-role"); core group ""
+	// yields a leading slash (e.g. "/v1/ConfigMap/apps/my-cm").
+	ID string `json:"id"`
+	// ResourceVersion observed at the time of last apply. Useful for drift
+	// detection and debugging; stored under the short JSON key "v" to keep
+	// the inventory compact.
+	ResourceVersion string `json:"v"`
 }
 
 // Condition types.

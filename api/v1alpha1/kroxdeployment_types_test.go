@@ -43,7 +43,7 @@ func TestKroxDeploymentRoundtrip(t *testing.T) {
 			LastAttemptedRevision: "sha:def",
 			Inventory: &ResourceInventory{
 				Entries: []ResourceRef{
-					{ID: "apps/v1/Deployment/y/app", Version: "100"},
+					{ID: "apps/v1/Deployment/y/app", ResourceVersion: "100"},
 				},
 			},
 		},
