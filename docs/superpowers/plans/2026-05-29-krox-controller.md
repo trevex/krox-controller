@@ -143,15 +143,15 @@ var GroupVersion = schema.GroupVersion{Group: "krox.io", Version: "v1alpha1"}
 
 And update `PROJECT` similarly so subsequent `make manifests` is correct.
 
-- [ ] **Step 1.5: Add runtime dependencies**
+- [ ] **Step 1.5: (Deferred — see note)**
 
-```
-go get github.com/kubernetes-sigs/kro@v0.9.2
-go get github.com/fluxcd/source-controller/api@v1.8.5
-go get sigs.k8s.io/e2e-framework@latest
-go mod tidy
-```
-Expected: `go.mod` shows all three. If `kro` pulls in conflicting `k8s.io/*` versions, accept `go mod tidy`'s resolution and re-run `go build ./...` to confirm.
+Originally this step ran `go get` for KRO, Flux source, and e2e-framework. In practice these deps cannot survive `go mod tidy` until production code imports them, and a `hack/tools.go` build-tag workaround causes gopls to flag missing transitive `go.sum` entries. Deps are added with the tasks that introduce the imports:
+
+- KRO (`github.com/kubernetes-sigs/kro v0.9.2`) → Task 4 (`internal/render/parser.go`)
+- Flux source API (`github.com/fluxcd/source-controller/api v1.8.5`) → Task 7 (`internal/source/resolver.go`)
+- e2e-framework (`sigs.k8s.io/e2e-framework`) → Task 13 (`test/e2e/e2e_suite_test.go`)
+
+No action needed here.
 
 - [ ] **Step 1.6: Vendor Flux source CRDs for envtest**
 
