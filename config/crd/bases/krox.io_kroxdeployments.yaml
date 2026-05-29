@@ -11,13 +11,25 @@ spec:
     kind: KroxDeployment
     listKind: KroxDeploymentList
     plural: kroxdeployments
+    shortNames:
+    - krox
     singular: kroxdeployment
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.lastAppliedRevision
+      name: Revision
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: KroxDeployment is the Schema for the kroxdeployments API
+        description: KroxDeployment is a KRO RGD applied to the cluster.
         properties:
           apiVersion:
             description: |-
@@ -37,27 +49,58 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of KroxDeployment
+            description: KroxDeploymentSpec defines a KRO RGD render+apply unit.
             properties:
-              foo:
-                description: foo is an example field of KroxDeployment. Edit kroxdeployment_types.go
-                  to remove/update
+              force:
+                description: Force forces server-side-apply to take ownership on conflicts.
+                type: boolean
+              interval:
+                description: Interval is how often the controller re-renders and applies.
                 type: string
+              path:
+                description: Path is the location of the RGD YAML inside the source
+                  artifact.
+                minLength: 1
+                type: string
+              prune:
+                description: Prune deletes owned objects no longer present in the
+                  latest render.
+                type: boolean
+              sourceRef:
+                description: SourceRef points at a Flux source CR containing the RGD
+                  artifact.
+                properties:
+                  kind:
+                    enum:
+                    - GitRepository
+                    - OCIRepository
+                    type: string
+                  name:
+                    minLength: 1
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              suspend:
+                description: Suspend pauses reconciliation when true.
+                type: boolean
+              values:
+                description: |-
+                  Values are the instance values for the RGD. Validated at render time
+                  against the RGD's spec schema.
+                x-kubernetes-preserve-unknown-fields: true
+            required:
+            - interval
+            - path
+            - sourceRef
             type: object
           status:
-            description: status defines the observed state of KroxDeployment
+            description: KroxDeploymentStatus reports the last reconcile outcome.
             properties:
               conditions:
-                description: |-
-                  conditions represent the current state of the KroxDeployment resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -113,12 +156,37 @@ spec:
                   - type
                   type: object
                 type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
+              inventory:
+                description: ResourceInventory lists objects last applied by a KroxDeployment.
+                properties:
+                  entries:
+                    items:
+                      description: |-
+                        ResourceRef is a stable identifier for an applied object.
+                        ID = "<group>/<version>/<kind>/<namespace>/<name>"; cluster-scoped objects
+                        use an empty namespace component (e.g. "rbac.authorization.k8s.io/v1/ClusterRole//x");
+                        core group "" yields a leading slash (e.g. "/v1/ConfigMap/ns/x").
+                      properties:
+                        id:
+                          type: string
+                        v:
+                          type: string
+                      required:
+                      - id
+                      - v
+                      type: object
+                    type: array
+                required:
+                - entries
+                type: object
+              lastAppliedRevision:
+                type: string
+              lastAttemptedRevision:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
             type: object
-        required:
-        - spec
         type: object
     served: true
     storage: true
