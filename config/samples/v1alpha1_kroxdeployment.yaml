@@ -1,0 +1,9 @@
+apiVersion: krox.io/v1alpha1
+kind: KroxDeployment
+metadata:
+  labels:
+    app.kubernetes.io/name: krox-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: kroxdeployment-sample
+spec:
+  # TODO(user): Add fields here
