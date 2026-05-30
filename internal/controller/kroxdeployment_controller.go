@@ -150,7 +150,6 @@ func (r *KroxDeploymentReconciler) reconcile(ctx context.Context, kd *v1alpha1.K
 	// 5. Apply layer-by-layer with observe-back.
 	ownerKey := fmt.Sprintf("%s/%s", kd.Namespace, kd.Name)
 	newInv := &v1alpha1.ResourceInventory{}
-	r.Applier.Force = kd.Spec.Force
 	for _, node := range rt.Nodes() {
 		ignored, err := node.IsIgnored()
 		if err != nil {
@@ -165,7 +164,7 @@ func (r *KroxDeploymentReconciler) reconcile(ctx context.Context, kd *v1alpha1.K
 		}
 		observed := make([]*unstructured.Unstructured, 0, len(desired))
 		for _, obj := range desired {
-			applied, err := r.Applier.Apply(ctx, obj, ownerKey, art.Revision)
+			applied, err := r.Applier.Apply(ctx, obj, ownerKey, art.Revision, kd.Spec.Force)
 			if err != nil {
 				return r.transientWithInventory(ctx, kd, newInv, "ApplyFailed", err)
 			}

@@ -50,7 +50,7 @@ func TestApplyAddsLabelAndAnnotation(t *testing.T) {
 	// annotation and revision annotation on the input object before sending it
 	// to the API server.
 	obj := newCM("ns", "x")
-	_, _ = a.Apply(context.Background(), obj, "apps/web", "sha:1")
+	_, _ = a.Apply(context.Background(), obj, "apps/web", "sha:1", false)
 
 	if v := obj.GetAnnotations()["krox.io/owned-by"]; v != "apps/web" {
 		t.Fatalf("owner annotation: %q", v)

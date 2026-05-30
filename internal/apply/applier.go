@@ -26,12 +26,12 @@ type Applier struct {
 	Dynamic      dynamic.Interface
 	Mapper       meta.RESTMapper
 	FieldManager string
-	Force        bool
 }
 
 // Apply server-side-applies obj after stamping the owner label and revision
-// annotation. Returns the live object returned by the API server.
-func (a *Applier) Apply(ctx context.Context, obj *unstructured.Unstructured, ownerKey, revision string) (*unstructured.Unstructured, error) {
+// annotation. Returns the live object returned by the API server. The force
+// parameter controls whether field-manager conflicts are forcibly taken over.
+func (a *Applier) Apply(ctx context.Context, obj *unstructured.Unstructured, ownerKey, revision string, force bool) (*unstructured.Unstructured, error) {
 	annot := obj.GetAnnotations()
 	if annot == nil {
 		annot = map[string]string{}
@@ -59,7 +59,7 @@ func (a *Applier) Apply(ctx context.Context, obj *unstructured.Unstructured, own
 	if fieldMgr == "" {
 		fieldMgr = DefaultFieldOwner
 	}
-	opts := metav1.PatchOptions{FieldManager: fieldMgr, Force: ptrBool(a.Force)}
+	opts := metav1.PatchOptions{FieldManager: fieldMgr, Force: ptrBool(force)}
 	out, err := iface.Patch(ctx, obj.GetName(), types.ApplyPatchType, data, opts)
 	if err != nil {
 		return nil, fmt.Errorf("apply %s/%s: %w", gvk.Kind, obj.GetName(), err)
