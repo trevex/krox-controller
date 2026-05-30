@@ -18,46 +18,213 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
 
+	srcv1 "github.com/fluxcd/source-controller/api/v1"
+	v1alpha1 "github.com/trevex/krox-controller/api/v1alpha1"
+	"github.com/trevex/krox-controller/internal/apply"
+	"github.com/trevex/krox-controller/internal/render"
+	"github.com/trevex/krox-controller/internal/source"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
-
-	corev1alpha1 "github.com/trevex/krox-controller/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// KroxDeploymentReconciler reconciles a KroxDeployment object
+// KroxDeploymentReconciler reconciles a KroxDeployment.
 type KroxDeploymentReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme     *runtime.Scheme
+	RestConfig *rest.Config
+	HTTPClient *http.Client
+
+	Resolver *source.Resolver
+	Fetcher  *source.Fetcher
+	Engine   *render.Engine
+	Applier  *apply.Applier
+	Pruner   *apply.Pruner
 }
 
 // +kubebuilder:rbac:groups=krox.io,resources=kroxdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=krox.io,resources=kroxdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=krox.io,resources=kroxdeployments/finalizers,verbs=update
+// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories;ocirepositories,verbs=get;list;watch
+// +kubebuilder:rbac:groups="*",resources="*",verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the KroxDeployment object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
 func (r *KroxDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
-	// TODO(user): your logic here
+	var kd v1alpha1.KroxDeployment
+	if err := r.Get(ctx, req.NamespacedName, &kd); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if kd.Spec.Suspend {
+		return ctrl.Result{}, nil
+	}
 
+	// Mark Reconciling.
+	r.setCondition(&kd, v1alpha1.ConditionReconciling, metav1.ConditionTrue, "Progressing", "Reconciling")
+	apimeta.RemoveStatusCondition(&kd.Status.Conditions, v1alpha1.ConditionStalled)
+	if err := r.Status().Update(ctx, &kd); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	res, err := r.reconcile(ctx, &kd)
+	if err != nil {
+		logger.Error(err, "reconcile failed")
+	}
+	return res, err
+}
+
+func (r *KroxDeploymentReconciler) reconcile(ctx context.Context, kd *v1alpha1.KroxDeployment) (ctrl.Result, error) {
+	// 1. Resolve source.
+	art, err := r.Resolver.Resolve(ctx, kd.Namespace, kd.Spec.SourceRef)
+	if err != nil {
+		if source.IsNotReady(err) {
+			r.setCondition(kd, v1alpha1.ConditionReady, metav1.ConditionFalse, "SourceNotReady", err.Error())
+			_ = r.Status().Update(ctx, kd)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		return r.terminal(ctx, kd, "SourceError", err)
+	}
+	kd.Status.LastAttemptedRevision = art.Revision
+
+	// 2. Fetch artifact.
+	dir, err := os.MkdirTemp("", "krox-*")
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	defer os.RemoveAll(dir)
+	if err := r.Fetcher.Fetch(ctx, *art, dir); err != nil {
+		return r.transient(ctx, kd, "FetchFailed", err)
+	}
+
+	// 3. Read RGD file.
+	rgdData, err := os.ReadFile(filepath.Join(dir, filepath.Clean(kd.Spec.Path)))
+	if err != nil {
+		return r.terminal(ctx, kd, "RGDNotFound", err)
+	}
+	rgd, err := render.ParseRGD(rgdData)
+	if err != nil {
+		return r.terminal(ctx, kd, "RGDInvalid", err)
+	}
+
+	// 4. Build instance and plan.
+	values := []byte("{}")
+	if kd.Spec.Values != nil {
+		values = kd.Spec.Values.Raw
+	}
+	inst, err := render.BuildInstance(rgd, kd.Name, kd.Namespace, values)
+	if err != nil {
+		return r.terminal(ctx, kd, "InstanceInvalid", err)
+	}
+	rt, err := r.Engine.Plan(rgd, inst)
+	if err != nil {
+		return r.terminal(ctx, kd, "PlanFailed", err)
+	}
+
+	// 5. Apply layer-by-layer with observe-back.
+	ownerKey := fmt.Sprintf("%s/%s", kd.Namespace, kd.Name)
+	newInv := &v1alpha1.ResourceInventory{}
+	r.Applier.Force = kd.Spec.Force
+	for _, node := range rt.Nodes() {
+		desired, err := node.GetDesired()
+		if err != nil {
+			return r.terminal(ctx, kd, "RenderFailed", err)
+		}
+		observed := make([]*unstructured.Unstructured, 0, len(desired))
+		for _, obj := range desired {
+			applied, err := r.Applier.Apply(ctx, obj, ownerKey, art.Revision)
+			if err != nil {
+				return r.transient(ctx, kd, "ApplyFailed", err)
+			}
+			newInv.Entries = append(newInv.Entries, v1alpha1.ResourceRef{
+				ID: apply.IDFromObject(applied), ResourceVersion: applied.GetResourceVersion(),
+			})
+			observed = append(observed, applied)
+		}
+		node.SetObserved(observed)
+	}
+
+	// 6. Prune.
+	if kd.Spec.Prune {
+		for _, ref := range apply.Diff(kd.Status.Inventory, newInv) {
+			err := r.Pruner.Delete(ctx, ref.ID)
+			if err != nil && !apierrors.IsNotFound(err) {
+				return r.transient(ctx, kd, "PruneFailed", err)
+			}
+		}
+	}
+
+	// 7. Persist success.
+	kd.Status.Inventory = newInv
+	kd.Status.LastAppliedRevision = art.Revision
+	kd.Status.ObservedGeneration = kd.Generation
+	apimeta.RemoveStatusCondition(&kd.Status.Conditions, v1alpha1.ConditionReconciling)
+	r.setCondition(kd, v1alpha1.ConditionReady, metav1.ConditionTrue, "ApplySucceeded",
+		fmt.Sprintf("Applied %d resources at revision %s", len(newInv.Entries), art.Revision))
+	if err := r.Status().Update(ctx, kd); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: kd.Spec.Interval.Duration}, nil
+}
+
+func (r *KroxDeploymentReconciler) setCondition(kd *v1alpha1.KroxDeployment, t string, s metav1.ConditionStatus, reason, msg string) {
+	apimeta.SetStatusCondition(&kd.Status.Conditions, metav1.Condition{
+		Type: t, Status: s, Reason: reason, Message: msg, ObservedGeneration: kd.Generation,
+	})
+}
+
+func (r *KroxDeploymentReconciler) terminal(ctx context.Context, kd *v1alpha1.KroxDeployment, reason string, err error) (ctrl.Result, error) {
+	r.setCondition(kd, v1alpha1.ConditionReady, metav1.ConditionFalse, reason, err.Error())
+	r.setCondition(kd, v1alpha1.ConditionStalled, metav1.ConditionTrue, reason, err.Error())
+	apimeta.RemoveStatusCondition(&kd.Status.Conditions, v1alpha1.ConditionReconciling)
+	_ = r.Status().Update(ctx, kd)
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
+func (r *KroxDeploymentReconciler) transient(ctx context.Context, kd *v1alpha1.KroxDeployment, reason string, err error) (ctrl.Result, error) {
+	r.setCondition(kd, v1alpha1.ConditionReady, metav1.ConditionFalse, reason, err.Error())
+	_ = r.Status().Update(ctx, kd)
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
 func (r *KroxDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	mapFn := func(ctx context.Context, obj client.Object) []reconcile.Request {
+		var list v1alpha1.KroxDeploymentList
+		if err := mgr.GetClient().List(ctx, &list); err != nil {
+			return nil
+		}
+		ns := obj.GetNamespace()
+		name := obj.GetName()
+		var out []reconcile.Request
+		for _, kd := range list.Items {
+			srcNs := kd.Spec.SourceRef.Namespace
+			if srcNs == "" {
+				srcNs = kd.Namespace
+			}
+			if srcNs == ns && kd.Spec.SourceRef.Name == name {
+				out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: kd.Namespace, Name: kd.Name}})
+			}
+		}
+		return out
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&corev1alpha1.KroxDeployment{}).
-		Named("kroxdeployment").
+		For(&v1alpha1.KroxDeployment{}).
+		Watches(&srcv1.GitRepository{}, handler.EnqueueRequestsFromMapFunc(mapFn)).
+		Watches(&srcv1.OCIRepository{}, handler.EnqueueRequestsFromMapFunc(mapFn)).
 		Complete(r)
 }
