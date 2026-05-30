@@ -1,8 +1,33 @@
 # krox-controller
-// TODO(user): Add simple overview of use/purpose
+
+> [!WARNING]
+> This project was vibe coded to validate an idea and is not production-ready software!
+
+A Kubernetes controller that renders [KRO](https://kro.run) `ResourceGraphDefinition`s
+(RGDs) from Flux sources and applies the resulting objects to the cluster.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+
+`krox-controller` bridges [Flux](https://fluxcd.io) and [KRO](https://kro.run):
+it watches `GitRepository` / `OCIRepository` source CRs for RGD artifacts,
+renders the RGD against per-instance values, and reconciles the resulting
+Kubernetes objects via server-side apply.
+
+The controller exposes a single CRD, `KroxDeployment` (short name `krox`), which
+declares:
+
+- a Flux `sourceRef` and `path` pointing at an RGD YAML inside the source artifact,
+- `values` used to evaluate the RGD's spec schema and CEL expressions,
+- an `interval` for periodic re-reconciliation (source events also re-enqueue),
+- `prune` to garbage-collect objects no longer present in the latest render,
+- `force` to take SSA field ownership on conflicts.
+
+Status is reported via standard `Ready` / `Reconciling` / `Stalled` conditions
+along with `lastAppliedRevision`, `observedGeneration`, and an `inventory` of
+applied objects used for drift detection and pruning.
+
+See [`docs/usage.md`](docs/usage.md) for a worked example and a description of
+each condition, and `config/samples/` for a minimal CR.
 
 ## Getting Started
 
@@ -111,7 +136,18 @@ previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml
 is manually re-applied afterwards.
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
+
+Issues and pull requests are welcome. Before opening a PR:
+
+- Read [`AGENTS.md`](AGENTS.md) for the project layout, generated-file rules, and
+  Kubebuilder conventions used here.
+- Run `make manifests generate` after editing `*_types.go` or kubebuilder markers.
+- Run `make lint-fix test` before pushing — unit tests use envtest (real
+  API server + etcd) and must pass locally.
+- Validate changes end-to-end against a [Kind](https://kind.sigs.k8s.io/) cluster
+  with `make test-e2e`; do not run e2e against a shared dev/prod cluster.
+- Keep changes focused and the commit history readable: one logical change per
+  commit, conventional-style subject lines (`fix:`, `feat:`, …).
 
 **NOTE:** Run `make help` for more information on all potential `make` targets
 
