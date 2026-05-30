@@ -41,6 +41,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlruntime "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -293,5 +294,6 @@ func (r *KroxDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&v1alpha1.KroxDeployment{}).
 		Watches(&srcv1.GitRepository{}, handler.EnqueueRequestsFromMapFunc(mapFn)).
 		Watches(&srcv1.OCIRepository{}, handler.EnqueueRequestsFromMapFunc(mapFn)).
+		WithOptions(ctrlruntime.Options{MaxConcurrentReconciles: 4}).
 		Complete(r)
 }
