@@ -21,6 +21,7 @@ import (
 	"flag"
 	"net/http"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -222,7 +223,7 @@ func main() {
 		RestConfig: restCfg,
 		HTTPClient: httpClient,
 		Resolver:   &source.Resolver{Client: mgr.GetClient()},
-		Fetcher:    &source.Fetcher{HTTPClient: http.DefaultClient},
+		Fetcher:    &source.Fetcher{HTTPClient: &http.Client{Timeout: 5 * time.Minute}},
 		Engine:     engine,
 		Applier:    &apply.Applier{Dynamic: dyn, Mapper: mapper, FieldManager: apply.DefaultFieldOwner},
 		Pruner:     &apply.Pruner{Dynamic: dyn, Mapper: mapper},

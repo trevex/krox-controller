@@ -15,6 +15,10 @@ import (
 	"strings"
 )
 
+// MaxArtifactBytes caps the in-memory artifact payload to defend against
+// unbounded downloads. Tunable when we hit real-world larger artifacts.
+const MaxArtifactBytes = 100 << 20 // 100 MiB
+
 // Fetcher downloads Flux artifact tarballs, verifies digests, and untars
 // into a target directory.
 type Fetcher struct {
@@ -43,9 +47,12 @@ func (f *Fetcher) Fetch(ctx context.Context, info ArtifactInfo, destDir string) 
 
 	// Buffer the entire body so we can verify digest before untaring.
 	// (Sound semantics: a wrong digest must not produce on-disk files.)
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxArtifactBytes+1))
 	if err != nil {
 		return fmt.Errorf("read body: %w", err)
+	}
+	if int64(len(body)) > MaxArtifactBytes {
+		return fmt.Errorf("artifact exceeds maximum size %d bytes", MaxArtifactBytes)
 	}
 	sum := sha256.Sum256(body)
 	got := "sha256:" + hex.EncodeToString(sum[:])
