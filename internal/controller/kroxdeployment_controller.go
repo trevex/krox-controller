@@ -151,13 +151,13 @@ func (r *KroxDeploymentReconciler) reconcile(ctx context.Context, kd *v1alpha1.K
 	for _, node := range rt.Nodes() {
 		desired, err := node.GetDesired()
 		if err != nil {
-			return r.terminal(ctx, kd, "RenderFailed", err)
+			return r.terminalWithInventory(ctx, kd, newInv, "RenderFailed", err)
 		}
 		observed := make([]*unstructured.Unstructured, 0, len(desired))
 		for _, obj := range desired {
 			applied, err := r.Applier.Apply(ctx, obj, ownerKey, art.Revision)
 			if err != nil {
-				return r.transient(ctx, kd, "ApplyFailed", err)
+				return r.transientWithInventory(ctx, kd, newInv, "ApplyFailed", err)
 			}
 			newInv.Entries = append(newInv.Entries, v1alpha1.ResourceRef{
 				ID: apply.IDFromObject(applied), ResourceVersion: applied.GetResourceVersion(),
@@ -208,6 +208,46 @@ func (r *KroxDeploymentReconciler) transient(ctx context.Context, kd *v1alpha1.K
 	r.setCondition(kd, v1alpha1.ConditionReady, metav1.ConditionFalse, reason, err.Error())
 	_ = r.Status().Update(ctx, kd)
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+func (r *KroxDeploymentReconciler) transientWithInventory(ctx context.Context, kd *v1alpha1.KroxDeployment, partialInv *v1alpha1.ResourceInventory, reason string, err error) (ctrl.Result, error) {
+	// Merge partial inventory with the previous one so applied-but-not-yet-tracked
+	// objects survive transient failures and can be pruned later.
+	kd.Status.Inventory = mergeInventory(kd.Status.Inventory, partialInv)
+	apimeta.RemoveStatusCondition(&kd.Status.Conditions, v1alpha1.ConditionReconciling)
+	r.setCondition(kd, v1alpha1.ConditionReady, metav1.ConditionFalse, reason, err.Error())
+	_ = r.Status().Update(ctx, kd)
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+func (r *KroxDeploymentReconciler) terminalWithInventory(ctx context.Context, kd *v1alpha1.KroxDeployment, partialInv *v1alpha1.ResourceInventory, reason string, err error) (ctrl.Result, error) {
+	kd.Status.Inventory = mergeInventory(kd.Status.Inventory, partialInv)
+	return r.terminal(ctx, kd, reason, err)
+}
+
+func mergeInventory(prev, partial *v1alpha1.ResourceInventory) *v1alpha1.ResourceInventory {
+	seen := map[string]struct{}{}
+	out := &v1alpha1.ResourceInventory{}
+	// partial first — most recent versions take precedence in append order
+	if partial != nil {
+		for _, r := range partial.Entries {
+			if _, ok := seen[r.ID]; ok {
+				continue
+			}
+			seen[r.ID] = struct{}{}
+			out.Entries = append(out.Entries, r)
+		}
+	}
+	if prev != nil {
+		for _, r := range prev.Entries {
+			if _, ok := seen[r.ID]; ok {
+				continue
+			}
+			seen[r.ID] = struct{}{}
+			out.Entries = append(out.Entries, r)
+		}
+	}
+	return out
 }
 
 func (r *KroxDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
