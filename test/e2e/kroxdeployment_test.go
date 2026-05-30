@@ -23,7 +23,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -251,4 +253,269 @@ func makeTarGz(entries map[string]string) []byte {
 func hexSha256(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// TestPrune exercises the prune path against a kind cluster:
+//  1. Start with an RGD that renders BOTH a Deployment and a Service.
+//  2. Wait for Ready and assert both resources exist and Inventory has 2 entries.
+//  3. Swap the in-cluster ConfigMap to an RGD that only renders the Deployment,
+//     restart the fixture-server pod (so the new tarball is mounted), and bump
+//     the GitRepository's artifact revision/digest.
+//  4. Assert the Service is pruned, the Deployment remains, Inventory has 1
+//     entry, and LastAppliedRevision advanced to v2.
+//
+// Uses distinct resource names from TestRenderAndApply so the two tests can
+// run sequentially in the same suite without colliding.
+func TestPrune(t *testing.T) {
+	rgdWithSvc, err := os.ReadFile("../testdata/rgds/webapp-with-svc.yaml")
+	if err != nil {
+		rgdWithSvc, err = os.ReadFile("../../test/testdata/rgds/webapp-with-svc.yaml")
+	}
+	require.NoError(t, err, "read webapp-with-svc.yaml")
+	rgdNoSvc, err := os.ReadFile("../testdata/rgds/webapp-svc-removed.yaml")
+	if err != nil {
+		rgdNoSvc, err = os.ReadFile("../../test/testdata/rgds/webapp-svc-removed.yaml")
+	}
+	require.NoError(t, err, "read webapp-svc-removed.yaml")
+
+	tgzWith := makeTarGz(map[string]string{"rgd.yaml": string(rgdWithSvc)})
+	tgzWithout := makeTarGz(map[string]string{"rgd.yaml": string(rgdNoSvc)})
+	digestWith := "sha256:" + hexSha256(tgzWith)
+	digestWithout := "sha256:" + hexSha256(tgzWithout)
+
+	const (
+		cmName  = "fixture-tgz-prune"
+		svcName = "fixture-src-prune"
+		grName  = "fixture-src-prune"
+		kdName  = "webapp-prune"
+		appName = "prune-app"
+		svcKind = appName + "-svc"
+	)
+
+	f := features.New("prune").
+		Setup(deployFixtureServerNamed(tgzWith, cmName, svcName)).
+		Setup(createSuspendedGitRepoStatusNamed(grName, svcName, "v1", digestWith)).
+		Assess("KroxDeployment Ready and both resources exist", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+			cli := mustClient(t, c)
+
+			kd := &v1alpha1.KroxDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: kdName, Namespace: fixtureNamespace},
+				Spec: v1alpha1.KroxDeploymentSpec{
+					Interval:  metav1.Duration{Duration: 30 * time.Second},
+					SourceRef: v1alpha1.SourceReference{Kind: "GitRepository", Name: grName},
+					Path:      "rgd.yaml",
+					Values:    &apiextensionsv1.JSON{Raw: []byte(`{"name":"` + appName + `","replicas":1,"image":"nginx:1.27"}`)},
+					Prune:     true,
+				},
+			}
+			require.NoError(t, cli.Create(ctx, kd))
+
+			require.Eventually(t, func() bool {
+				out := &v1alpha1.KroxDeployment{}
+				if err := cli.Get(ctx, types.NamespacedName{Name: kdName, Namespace: fixtureNamespace}, out); err != nil {
+					return false
+				}
+				if out.Status.Inventory == nil || len(out.Status.Inventory.Entries) != 2 {
+					return false
+				}
+				for _, cond := range out.Status.Conditions {
+					if cond.Type == v1alpha1.ConditionReady && cond.Status == metav1.ConditionTrue {
+						return true
+					}
+				}
+				return false
+			}, 4*time.Minute, 3*time.Second, "KroxDeployment never became Ready with 2 inventory entries")
+
+			dep := &appsv1.Deployment{}
+			require.NoError(t, cli.Get(ctx, types.NamespacedName{Name: appName, Namespace: fixtureNamespace}, dep))
+			svc := &corev1.Service{}
+			require.NoError(t, cli.Get(ctx, types.NamespacedName{Name: svcKind, Namespace: fixtureNamespace}, svc))
+			return ctx
+		}).
+		Assess("Service is pruned when removed from RGD", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+			cli := mustClient(t, c)
+
+			// Swap the ConfigMap content (kubelet will eventually re-mount).
+			cm := &corev1.ConfigMap{}
+			require.NoError(t, cli.Get(ctx, types.NamespacedName{Name: cmName, Namespace: fixtureNamespace}, cm))
+			cm.BinaryData = map[string][]byte{"rgd.tgz": tgzWithout}
+			require.NoError(t, cli.Update(ctx, cm))
+
+			// Force a deterministic re-mount of the new ConfigMap content by
+			// restarting the fixture-server pod. kubelet's default ConfigMap
+			// sync period is ~60s; rollout restart is faster and predictable.
+			require.NoError(t, kubectlRolloutRestart(c, "deployment/"+svcName, fixtureNamespace))
+			require.NoError(t, kubectlRolloutStatus(c, "deployment/"+svcName, fixtureNamespace, 2*time.Minute))
+
+			// Bump the GitRepository artifact rev + digest so the controller
+			// picks up the new tarball on its next reconcile.
+			require.NoError(t, retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+				gr := &srcv1.GitRepository{}
+				if err := cli.Get(ctx, types.NamespacedName{Name: grName, Namespace: fixtureNamespace}, gr); err != nil {
+					return err
+				}
+				gr.Status.Artifact = &fluxmeta.Artifact{
+					URL:            "http://" + svcName + ".default.svc.cluster.local/rgd.tgz",
+					Path:           "rgd.tgz",
+					Revision:       "v2",
+					Digest:         digestWithout,
+					LastUpdateTime: metav1.Now(),
+				}
+				return cli.Status().Update(ctx, gr)
+			}))
+
+			// Eventually: LastAppliedRevision advances, Inventory shrinks to 1,
+			// and the Service is gone.
+			require.Eventually(t, func() bool {
+				out := &v1alpha1.KroxDeployment{}
+				if err := cli.Get(ctx, types.NamespacedName{Name: kdName, Namespace: fixtureNamespace}, out); err != nil {
+					return false
+				}
+				if out.Status.LastAppliedRevision != "v2" {
+					return false
+				}
+				if out.Status.Inventory == nil || len(out.Status.Inventory.Entries) != 1 {
+					return false
+				}
+				svc := &corev1.Service{}
+				err := cli.Get(ctx, types.NamespacedName{Name: svcKind, Namespace: fixtureNamespace}, svc)
+				// Expect NotFound (or any error indicating absence).
+				return err != nil
+			}, 4*time.Minute, 3*time.Second, "Service was not pruned after RGD swap")
+
+			// Sanity: Deployment must still exist.
+			dep := &appsv1.Deployment{}
+			require.NoError(t, cli.Get(ctx, types.NamespacedName{Name: appName, Namespace: fixtureNamespace}, dep))
+			return ctx
+		}).
+		Feature()
+
+	testenv.Test(t, f)
+}
+
+// deployFixtureServerNamed mirrors deployFixtureServer but with configurable
+// resource names so multiple tests can run side by side without collisions.
+func deployFixtureServerNamed(tgz []byte, cmName, svcName string) func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	return func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Helper()
+		cli := mustClient(t, c)
+
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: fixtureNamespace},
+			BinaryData: map[string][]byte{"rgd.tgz": tgz},
+		}
+		require.NoError(t, cli.Create(ctx, cm))
+
+		replicas := int32(1)
+		dep := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: fixtureNamespace},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &replicas,
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": svcName}},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": svcName}},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:         "httpd",
+							Image:        "busybox:1.36",
+							Command:      []string{"sh", "-c", "cd /www && exec busybox httpd -f -p 80"},
+							VolumeMounts: []corev1.VolumeMount{{Name: "www", MountPath: "/www"}},
+							Ports:        []corev1.ContainerPort{{ContainerPort: 80}},
+						}},
+						Volumes: []corev1.Volume{{
+							Name: "www",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{Name: cmName},
+								},
+							},
+						}},
+					},
+				},
+			},
+		}
+		require.NoError(t, cli.Create(ctx, dep))
+
+		svc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: fixtureNamespace},
+			Spec: corev1.ServiceSpec{
+				Selector: map[string]string{"app": svcName},
+				Ports: []corev1.ServicePort{{
+					Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP,
+				}},
+			},
+		}
+		require.NoError(t, cli.Create(ctx, svc))
+
+		require.Eventually(t, func() bool {
+			d := &appsv1.Deployment{}
+			if err := cli.Get(ctx, types.NamespacedName{Name: svcName, Namespace: fixtureNamespace}, d); err != nil {
+				return false
+			}
+			return d.Status.AvailableReplicas > 0
+		}, 3*time.Minute, 3*time.Second, "fixture Deployment "+svcName+" never became Available")
+		return ctx
+	}
+}
+
+// createSuspendedGitRepoStatusNamed mirrors createSuspendedGitRepoStatus with
+// configurable GitRepository / Service names and an explicit revision.
+func createSuspendedGitRepoStatusNamed(grName, svcName, revision, digest string) func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	return func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Helper()
+		cli := mustClient(t, c)
+		gr := &srcv1.GitRepository{
+			ObjectMeta: metav1.ObjectMeta{Name: grName, Namespace: fixtureNamespace},
+			Spec: srcv1.GitRepositorySpec{
+				URL:      "https://example.invalid/fixture.git",
+				Interval: metav1.Duration{Duration: time.Hour},
+				Suspend:  true,
+			},
+		}
+		require.NoError(t, cli.Create(ctx, gr))
+		require.NoError(t, retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			cur := &srcv1.GitRepository{}
+			if err := cli.Get(ctx, types.NamespacedName{Name: grName, Namespace: fixtureNamespace}, cur); err != nil {
+				return err
+			}
+			cur.Status = srcv1.GitRepositoryStatus{
+				Conditions: []metav1.Condition{{
+					Type:               "Ready",
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "Test",
+					Message:            "fixture status patched by e2e prune test",
+				}},
+				Artifact: &fluxmeta.Artifact{
+					URL:            "http://" + svcName + ".default.svc.cluster.local/rgd.tgz",
+					Path:           "rgd.tgz",
+					Revision:       revision,
+					Digest:         digest,
+					LastUpdateTime: metav1.Now(),
+				},
+			}
+			return cli.Status().Update(ctx, cur)
+		}))
+		return ctx
+	}
+}
+
+// kubectlRolloutRestart shells out to `kubectl rollout restart` to force a
+// pod rotation. Used to deterministically re-mount a swapped ConfigMap rather
+// than waiting for kubelet's periodic sync.
+func kubectlRolloutRestart(c *envconf.Config, target, ns string) error {
+	out, err := exec.Command("kubectl", "--kubeconfig", c.KubeconfigFile(), "-n", ns, "rollout", "restart", target).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("rollout restart %s: %w\n%s", target, err, string(out))
+	}
+	return nil
+}
+
+// kubectlRolloutStatus waits for `kubectl rollout status` to converge.
+func kubectlRolloutStatus(c *envconf.Config, target, ns string, timeout time.Duration) error {
+	out, err := exec.Command("kubectl", "--kubeconfig", c.KubeconfigFile(), "-n", ns, "rollout", "status", target, "--timeout="+timeout.String()).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("rollout status %s: %w\n%s", target, err, string(out))
+	}
+	return nil
 }
