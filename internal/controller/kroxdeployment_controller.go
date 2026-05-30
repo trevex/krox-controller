@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	srcv1 "github.com/fluxcd/source-controller/api/v1"
+	kroruntime "github.com/kubernetes-sigs/kro/pkg/runtime"
 	v1alpha1 "github.com/trevex/krox-controller/api/v1alpha1"
 	"github.com/trevex/krox-controller/internal/apply"
 	"github.com/trevex/krox-controller/internal/render"
@@ -150,6 +152,13 @@ func (r *KroxDeploymentReconciler) reconcile(ctx context.Context, kd *v1alpha1.K
 	newInv := &v1alpha1.ResourceInventory{}
 	r.Applier.Force = kd.Spec.Force
 	for _, node := range rt.Nodes() {
+		ignored, err := node.IsIgnored()
+		if err != nil {
+			return r.terminalWithInventory(ctx, kd, newInv, "RenderFailed", err)
+		}
+		if ignored {
+			continue
+		}
 		desired, err := node.GetDesired()
 		if err != nil {
 			return r.terminalWithInventory(ctx, kd, newInv, "RenderFailed", err)
@@ -166,6 +175,14 @@ func (r *KroxDeploymentReconciler) reconcile(ctx context.Context, kd *v1alpha1.K
 			observed = append(observed, applied)
 		}
 		node.SetObserved(observed)
+
+		// Wait for readyWhen if this node specifies it.
+		if err := node.CheckReadiness(); err != nil {
+			if errors.Is(err, kroruntime.ErrWaitingForReadiness) {
+				return r.transientWithInventory(ctx, kd, newInv, "WaitingForReadiness", err)
+			}
+			return r.terminalWithInventory(ctx, kd, newInv, "ReadinessCheckFailed", err)
+		}
 	}
 
 	// 6. Prune.
