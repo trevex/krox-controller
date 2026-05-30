@@ -61,35 +61,6 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
-KIND_CLUSTER ?= krox-controller-test-e2e
-
-.PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
-	@command -v $(KIND) >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
-		exit 1; \
-	}
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
-	esac
-
-.PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
-	$(MAKE) cleanup-test-e2e
-
-.PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
-	@$(KIND) delete cluster --name $(KIND_CLUSTER)
-
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run
@@ -253,3 +224,29 @@ endef
 define gomodver
 $(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
+
+##@ E2E (kind)
+
+# KIND_CLUSTER is the name of the local kind cluster used for e2e tests.
+KIND_CLUSTER ?= krox-e2e
+# KIND_NODE_IMAGE pins the Kubernetes node image used by kind. Update in
+# lockstep with the kind release notes.
+KIND_NODE_IMAGE ?= kindest/node:v1.33.0
+
+.PHONY: kind-up
+kind-up: ## Create the kind cluster used for e2e tests if it does not exist.
+	@if ! $(KIND) get clusters | grep -q $(KIND_CLUSTER); then \
+		$(KIND) create cluster --name $(KIND_CLUSTER) --image $(KIND_NODE_IMAGE); \
+	fi
+
+.PHONY: kind-down
+kind-down: ## Tear down the kind cluster used for e2e tests.
+	-$(KIND) delete cluster --name $(KIND_CLUSTER)
+
+.PHONY: kind-load
+kind-load: docker-build ## Build the manager image and load it into the kind cluster.
+	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
+
+.PHONY: test-e2e
+test-e2e: kind-up kind-load ## Run the e2e test suite against the kind cluster.
+	IMG=$(IMG) go test ./test/e2e/... -v -timeout 20m

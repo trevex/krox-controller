@@ -1,6 +1,3 @@
-//go:build e2e
-// +build e2e
-
 /*
 Copyright 2026 krox-controller authors.
 
@@ -17,85 +14,128 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package e2e is the kind-based end-to-end test suite for krox-controller.
+//
+// The suite expects a running kind cluster with the krox-controller image
+// pre-loaded. Use `make test-e2e IMG=krox-controller:test` to drive the
+// full cycle (kind-up, image build+load, then `go test`).
 package e2e
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
+	"time"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-
-	"github.com/trevex/krox-controller/test/utils"
+	"sigs.k8s.io/e2e-framework/pkg/env"
+	"sigs.k8s.io/e2e-framework/pkg/envconf"
 )
 
-var (
-	// managerImage is the manager image to be built and loaded for testing.
-	managerImage = "example.com/krox-controller:v0.0.1"
-	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
-	shouldCleanupCertManager = false
+// testenv is the package-wide e2e-framework environment shared by all specs.
+// It is initialised in TestMain after the cluster has been seeded with the
+// Flux source-controller and the krox-controller manager.
+var testenv env.Environment
+
+// krox-controller manager Deployment coordinates (matches `config/default`
+// kustomize output). Specs and per-feature setups may reuse these.
+const (
+	kroxControllerNamespace      = "krox-controller-system"
+	kroxControllerDeploymentName = "krox-controller-controller-manager"
+
+	fluxSystemNamespace            = "flux-system"
+	sourceControllerDeploymentName = "source-controller"
 )
 
-// TestE2E runs the e2e test suite to validate the solution in an isolated environment.
-// The default setup requires Kind and CertManager.
-//
-// To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
-func TestE2E(t *testing.T) {
-	RegisterFailHandler(Fail)
-	_, _ = fmt.Fprintf(GinkgoWriter, "Starting krox-controller e2e test suite\n")
-	RunSpecs(t, "e2e suite")
+func TestMain(m *testing.M) {
+	cfg, err := envconf.NewFromFlags()
+	if err != nil {
+		panic(fmt.Errorf("envconf: %w", err))
+	}
+	testenv = env.NewWithConfig(cfg)
+
+	testenv.Setup(
+		applyManifest("../../hack/vendored-crds/source-controller-install.yaml", fluxSystemNamespace),
+		applyKustomize("../../config/default"),
+		waitForDeployment(sourceControllerDeploymentName, fluxSystemNamespace, 3*time.Minute),
+		waitForDeployment(kroxControllerDeploymentName, kroxControllerNamespace, 3*time.Minute),
+	)
+
+	os.Exit(testenv.Run(m))
 }
 
-var _ = BeforeSuite(func() {
-	By("building the manager image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
-	_, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
-
-	// TODO(user): If you want to change the e2e test vendor from Kind,
-	// ensure the image is built and available, then remove the following block.
-	By("loading the manager image on Kind")
-	err = utils.LoadImageToKindClusterWithName(managerImage)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
-
-	setupCertManager()
-})
-
-var _ = AfterSuite(func() {
-	teardownCertManager()
-})
-
-// setupCertManager installs CertManager if needed for webhook tests.
-// Skips installation if CERT_MANAGER_INSTALL_SKIP=true or if already present.
-func setupCertManager() {
-	if os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true" {
-		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager installation (CERT_MANAGER_INSTALL_SKIP=true)\n")
-		return
+// applyManifest runs `kubectl apply -f path [-n namespace]` against the env's
+// kubeconfig. Resources in the manifest with an explicit `metadata.namespace`
+// keep that value; the -n flag only applies to bare resources.
+func applyManifest(path, namespace string) env.Func {
+	return func(ctx context.Context, c *envconf.Config) (context.Context, error) {
+		args := []string{"apply", "-f", path, "--kubeconfig", c.KubeconfigFile()}
+		if namespace != "" {
+			args = append(args, "--namespace", namespace)
+		}
+		out, err := exec.Command("kubectl", args...).CombinedOutput()
+		if err != nil {
+			return ctx, fmt.Errorf("kubectl apply %s: %w\n%s", path, err, string(out))
+		}
+		return ctx, nil
 	}
-
-	By("checking if CertManager is already installed")
-	if utils.IsCertManagerCRDsInstalled() {
-		_, _ = fmt.Fprintf(GinkgoWriter, "CertManager is already installed. Skipping installation.\n")
-		return
-	}
-
-	// Mark for cleanup before installation to handle interruptions and partial installs.
-	shouldCleanupCertManager = true
-
-	By("installing CertManager")
-	Expect(utils.InstallCertManager()).To(Succeed(), "Failed to install CertManager")
 }
 
-// teardownCertManager uninstalls CertManager if it was installed by setupCertManager.
-// This ensures we only remove what we installed.
-func teardownCertManager() {
-	if !shouldCleanupCertManager {
-		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager cleanup (not installed by this suite)\n")
-		return
+// applyKustomize builds the kustomization at dir and pipes the result to
+// `kubectl apply -f -`. This avoids requiring the caller to materialise the
+// rendered manifest on disk.
+func applyKustomize(dir string) env.Func {
+	return func(ctx context.Context, c *envconf.Config) (context.Context, error) {
+		built, err := exec.Command("kustomize", "build", dir).Output()
+		if err != nil {
+			return ctx, fmt.Errorf("kustomize build %s: %w", dir, err)
+		}
+		cmd := exec.Command("kubectl", "apply", "-f", "-", "--kubeconfig", c.KubeconfigFile())
+		cmd.Stdin = bytes.NewReader(built)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return ctx, fmt.Errorf("kubectl apply (kustomize %s): %w\n%s", dir, err, string(out))
+		}
+		return ctx, nil
 	}
+}
 
-	By("uninstalling CertManager")
-	utils.UninstallCertManager()
+// waitForDeployment polls until the named Deployment in the given namespace
+// reports `.status.availableReplicas > 0` or the timeout elapses.
+func waitForDeployment(name, namespace string, timeout time.Duration) env.Func {
+	return func(ctx context.Context, c *envconf.Config) (context.Context, error) {
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			out, err := exec.Command("kubectl",
+				"--kubeconfig", c.KubeconfigFile(),
+				"-n", namespace, "get", "deployment", name,
+				"-o", "jsonpath={.status.availableReplicas}").CombinedOutput()
+			if err == nil && len(out) > 0 && string(out) != "0" {
+				return ctx, nil
+			}
+			time.Sleep(2 * time.Second)
+		}
+		return ctx, fmt.Errorf("deployment %s/%s not ready within %s", namespace, name, timeout)
+	}
+}
+
+// kubeconfigFile returns the suite's kubeconfig path. Useful from
+// per-test setups that need to shell out to kubectl directly.
+func kubeconfigFile() string {
+	return testenv.EnvConf().KubeconfigFile()
+}
+
+// projectRoot returns the absolute path to the repo root. Resolved relative
+// to this file (test/e2e/), so it stays stable regardless of where `go test`
+// is invoked from.
+func projectRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("projectRoot: %v", err)
+	}
+	return root
 }
