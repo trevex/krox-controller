@@ -13,7 +13,10 @@ import (
 )
 
 const (
-	OwnerLabel        = "krox.io/owned-by"
+	// OwnerAnnotation records the parent KroxDeployment as "<namespace>/<name>".
+	// Stored as an annotation (not a label) because the "/" separator is not
+	// permitted in label values.
+	OwnerAnnotation   = "krox.io/owned-by"
 	RevisionAnnot     = "krox.io/last-applied-revision"
 	DefaultFieldOwner = "krox-controller"
 )
@@ -29,17 +32,11 @@ type Applier struct {
 // Apply server-side-applies obj after stamping the owner label and revision
 // annotation. Returns the live object returned by the API server.
 func (a *Applier) Apply(ctx context.Context, obj *unstructured.Unstructured, ownerKey, revision string) (*unstructured.Unstructured, error) {
-	labels := obj.GetLabels()
-	if labels == nil {
-		labels = map[string]string{}
-	}
-	labels[OwnerLabel] = ownerKey
-	obj.SetLabels(labels)
-
 	annot := obj.GetAnnotations()
 	if annot == nil {
 		annot = map[string]string{}
 	}
+	annot[OwnerAnnotation] = ownerKey
 	annot[RevisionAnnot] = revision
 	obj.SetAnnotations(annot)
 

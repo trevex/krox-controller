@@ -47,16 +47,16 @@ func TestApplyAddsLabelAndAnnotation(t *testing.T) {
 	// The fake dynamic client doesn't fully support ApplyPatchType (it routes
 	// through StrategicMergePatch against an unstructured object), so we don't
 	// require Apply to succeed. Instead, we verify that Apply stamps the owner
-	// label and revision annotation on the input object before sending it to
-	// the API server.
+	// annotation and revision annotation on the input object before sending it
+	// to the API server.
 	obj := newCM("ns", "x")
 	_, _ = a.Apply(context.Background(), obj, "apps/web", "sha:1")
 
-	if v := obj.GetLabels()["krox.io/owned-by"]; v != "apps/web" {
-		t.Fatalf("label: %q", v)
+	if v := obj.GetAnnotations()["krox.io/owned-by"]; v != "apps/web" {
+		t.Fatalf("owner annotation: %q", v)
 	}
 	if v := obj.GetAnnotations()["krox.io/last-applied-revision"]; v != "sha:1" {
-		t.Fatalf("annotation: %q", v)
+		t.Fatalf("revision annotation: %q", v)
 	}
 }
 

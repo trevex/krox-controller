@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,14 +27,23 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	srcv1 "github.com/fluxcd/source-controller/api/v1"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/restmapper"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	corev1alpha1 "github.com/trevex/krox-controller/api/v1alpha1"
+	"github.com/trevex/krox-controller/internal/apply"
+	"github.com/trevex/krox-controller/internal/render"
+	"github.com/trevex/krox-controller/internal/source"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -63,11 +73,17 @@ var _ = BeforeSuite(func() {
 	err = corev1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
+	err = srcv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+
 	// +kubebuilder:scaffold:scheme
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "config", "crd", "bases"),
+			filepath.Join("..", "..", "hack", "vendored-crds"),
+		},
 		ErrorIfCRDPathMissing: true,
 	}
 
@@ -84,6 +100,42 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	// Build manager and wire the real reconciler.
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:  scheme.Scheme,
+		Metrics: metricsserver.Options{BindAddress: "0"},
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	httpClient, err := rest.HTTPClientFor(cfg)
+	Expect(err).NotTo(HaveOccurred())
+	engine, err := render.NewEngine(cfg, httpClient)
+	Expect(err).NotTo(HaveOccurred())
+	dyn, err := dynamic.NewForConfig(cfg)
+	Expect(err).NotTo(HaveOccurred())
+	disc, err := discovery.NewDiscoveryClientForConfig(cfg)
+	Expect(err).NotTo(HaveOccurred())
+	groupResources, err := restmapper.GetAPIGroupResources(disc)
+	Expect(err).NotTo(HaveOccurred())
+	mapper := restmapper.NewDiscoveryRESTMapper(groupResources)
+
+	Expect((&KroxDeploymentReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		RestConfig: cfg,
+		HTTPClient: httpClient,
+		Resolver:   &source.Resolver{Client: mgr.GetClient()},
+		Fetcher:    &source.Fetcher{HTTPClient: http.DefaultClient},
+		Engine:     engine,
+		Applier:    &apply.Applier{Dynamic: dyn, Mapper: mapper, FieldManager: apply.DefaultFieldOwner},
+		Pruner:     &apply.Pruner{Dynamic: dyn, Mapper: mapper},
+	}).SetupWithManager(mgr)).To(Succeed())
+
+	go func() {
+		defer GinkgoRecover()
+		Expect(mgr.Start(ctx)).To(Succeed())
+	}()
 })
 
 var _ = AfterSuite(func() {
