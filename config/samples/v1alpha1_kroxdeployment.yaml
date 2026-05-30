@@ -1,9 +1,17 @@
 apiVersion: krox.io/v1alpha1
 kind: KroxDeployment
 metadata:
-  labels:
-    app.kubernetes.io/name: krox-controller
-    app.kubernetes.io/managed-by: kustomize
-  name: kroxdeployment-sample
+  name: webapp-prod
+  namespace: apps
 spec:
-  # TODO(user): Add fields here
+  interval: 5m
+  sourceRef:
+    kind: GitRepository
+    name: blueprints
+    namespace: flux-system
+  path: ./rgds/webapp.yaml
+  values:
+    name: web
+    replicas: 3
+    image: nginx:1.27
+  prune: true
