@@ -17,7 +17,7 @@ reconciles drift and prunes resources removed from the RGD.
 
 ## Minimal example
 
-See `config/samples/krox_v1alpha1_kroxdeployment.yaml`.
+See `config/samples/v1alpha1_kroxdeployment.yaml`.
 
 ```yaml
 apiVersion: krox.io/v1alpha1
