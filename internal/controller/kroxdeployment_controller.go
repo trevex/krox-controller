@@ -94,6 +94,7 @@ func (r *KroxDeploymentReconciler) reconcile(ctx context.Context, kd *v1alpha1.K
 	art, err := r.Resolver.Resolve(ctx, kd.Namespace, kd.Spec.SourceRef)
 	if err != nil {
 		if source.IsNotReady(err) {
+			apimeta.RemoveStatusCondition(&kd.Status.Conditions, v1alpha1.ConditionReconciling)
 			r.setCondition(kd, v1alpha1.ConditionReady, metav1.ConditionFalse, "SourceNotReady", err.Error())
 			_ = r.Status().Update(ctx, kd)
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -205,6 +206,7 @@ func (r *KroxDeploymentReconciler) terminal(ctx context.Context, kd *v1alpha1.Kr
 }
 
 func (r *KroxDeploymentReconciler) transient(ctx context.Context, kd *v1alpha1.KroxDeployment, reason string, err error) (ctrl.Result, error) {
+	apimeta.RemoveStatusCondition(&kd.Status.Conditions, v1alpha1.ConditionReconciling)
 	r.setCondition(kd, v1alpha1.ConditionReady, metav1.ConditionFalse, reason, err.Error())
 	_ = r.Status().Update(ctx, kd)
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
