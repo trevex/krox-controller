@@ -27,7 +27,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -120,22 +119,4 @@ func waitForDeployment(name, namespace string, timeout time.Duration) env.Func {
 		}
 		return ctx, fmt.Errorf("deployment %s/%s not ready within %s", namespace, name, timeout)
 	}
-}
-
-// kubeconfigFile returns the suite's kubeconfig path. Useful from
-// per-test setups that need to shell out to kubectl directly.
-func kubeconfigFile() string {
-	return testenv.EnvConf().KubeconfigFile()
-}
-
-// projectRoot returns the absolute path to the repo root. Resolved relative
-// to this file (test/e2e/), so it stays stable regardless of where `go test`
-// is invoked from.
-func projectRoot(t *testing.T) string {
-	t.Helper()
-	root, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatalf("projectRoot: %v", err)
-	}
-	return root
 }

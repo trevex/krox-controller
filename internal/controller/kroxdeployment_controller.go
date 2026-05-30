@@ -107,13 +107,18 @@ func (r *KroxDeploymentReconciler) reconcile(ctx context.Context, kd *v1alpha1.K
 	kd.Status.LastAttemptedRevision = art.Revision
 
 	// 2. Fetch artifact.
+	logger := log.FromContext(ctx)
 	dir, err := os.MkdirTemp("", "krox-*")
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	defer os.RemoveAll(dir)
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			logger.Error(err, "Failed to remove temp directory", "dir", dir)
+		}
+	}()
 	if err := r.Fetcher.Fetch(ctx, *art, dir); err != nil {
-		return r.transient(ctx, kd, "FetchFailed", err)
+		return r.transient(ctx, kd, "FetchFailed", err), nil
 	}
 
 	// 3. Read RGD file.
@@ -167,7 +172,7 @@ func (r *KroxDeploymentReconciler) reconcile(ctx context.Context, kd *v1alpha1.K
 		for _, obj := range desired {
 			applied, err := r.Applier.Apply(ctx, obj, ownerKey, art.Revision, kd.Spec.Force)
 			if err != nil {
-				return r.transientWithInventory(ctx, kd, newInv, "ApplyFailed", err)
+				return r.transientWithInventory(ctx, kd, newInv, "ApplyFailed", err), nil
 			}
 			newInv.Entries = append(newInv.Entries, v1alpha1.ResourceRef{
 				ID: apply.IDFromObject(applied), ResourceVersion: applied.GetResourceVersion(),
@@ -179,7 +184,7 @@ func (r *KroxDeploymentReconciler) reconcile(ctx context.Context, kd *v1alpha1.K
 		// Wait for readyWhen if this node specifies it.
 		if err := node.CheckReadiness(); err != nil {
 			if errors.Is(err, kroruntime.ErrWaitingForReadiness) {
-				return r.transientWithInventory(ctx, kd, newInv, "WaitingForReadiness", err)
+				return r.transientWithInventory(ctx, kd, newInv, "WaitingForReadiness", err), nil
 			}
 			return r.terminalWithInventory(ctx, kd, newInv, "ReadinessCheckFailed", err)
 		}
@@ -190,7 +195,7 @@ func (r *KroxDeploymentReconciler) reconcile(ctx context.Context, kd *v1alpha1.K
 		for _, ref := range apply.Diff(kd.Status.Inventory, newInv) {
 			err := r.Pruner.Delete(ctx, ref.ID)
 			if err != nil && !apierrors.IsNotFound(err) {
-				return r.transient(ctx, kd, "PruneFailed", err)
+				return r.transient(ctx, kd, "PruneFailed", err), nil
 			}
 		}
 	}
@@ -222,21 +227,18 @@ func (r *KroxDeploymentReconciler) terminal(ctx context.Context, kd *v1alpha1.Kr
 	return ctrl.Result{}, nil
 }
 
-func (r *KroxDeploymentReconciler) transient(ctx context.Context, kd *v1alpha1.KroxDeployment, reason string, err error) (ctrl.Result, error) {
+func (r *KroxDeploymentReconciler) transient(ctx context.Context, kd *v1alpha1.KroxDeployment, reason string, err error) ctrl.Result {
 	apimeta.RemoveStatusCondition(&kd.Status.Conditions, v1alpha1.ConditionReconciling)
 	r.setCondition(kd, v1alpha1.ConditionReady, metav1.ConditionFalse, reason, err.Error())
 	_ = r.Status().Update(ctx, kd)
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: 30 * time.Second}
 }
 
-func (r *KroxDeploymentReconciler) transientWithInventory(ctx context.Context, kd *v1alpha1.KroxDeployment, partialInv *v1alpha1.ResourceInventory, reason string, err error) (ctrl.Result, error) {
+func (r *KroxDeploymentReconciler) transientWithInventory(ctx context.Context, kd *v1alpha1.KroxDeployment, partialInv *v1alpha1.ResourceInventory, reason string, err error) ctrl.Result {
 	// Merge partial inventory with the previous one so applied-but-not-yet-tracked
 	// objects survive transient failures and can be pruned later.
 	kd.Status.Inventory = mergeInventory(kd.Status.Inventory, partialInv)
-	apimeta.RemoveStatusCondition(&kd.Status.Conditions, v1alpha1.ConditionReconciling)
-	r.setCondition(kd, v1alpha1.ConditionReady, metav1.ConditionFalse, reason, err.Error())
-	_ = r.Status().Update(ctx, kd)
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	return r.transient(ctx, kd, reason, err)
 }
 
 func (r *KroxDeploymentReconciler) terminalWithInventory(ctx context.Context, kd *v1alpha1.KroxDeployment, partialInv *v1alpha1.ResourceInventory, reason string, err error) (ctrl.Result, error) {

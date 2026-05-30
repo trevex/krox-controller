@@ -40,7 +40,7 @@ func (f *Fetcher) Fetch(ctx context.Context, info ArtifactInfo, destDir string) 
 	if err != nil {
 		return fmt.Errorf("fetch %s: %w", info.URL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("fetch %s: status %d", info.URL, resp.StatusCode)
 	}
@@ -64,7 +64,7 @@ func (f *Fetcher) Fetch(ctx context.Context, info ArtifactInfo, destDir string) 
 	if err != nil {
 		return fmt.Errorf("gunzip: %w", err)
 	}
-	defer gzr.Close()
+	defer func() { _ = gzr.Close() }()
 	return untar(tar.NewReader(gzr), destDir)
 }
 
@@ -100,10 +100,12 @@ func untar(tr *tar.Reader, destDir string) error {
 				return err
 			}
 			if _, err := io.Copy(out, tr); err != nil {
-				out.Close()
+				_ = out.Close()
 				return err
 			}
-			out.Close()
+			if err := out.Close(); err != nil {
+				return err
+			}
 		default:
 			// skip symlinks/devices etc.
 		}

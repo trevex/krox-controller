@@ -29,8 +29,12 @@ func makeTarGz(t *testing.T, entries map[string]string) []byte {
 			t.Fatal(err)
 		}
 	}
-	tw.Close()
-	gz.Close()
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
 	return buf.Bytes()
 }
 
@@ -43,7 +47,7 @@ func TestFetchSuccess(t *testing.T) {
 	data := makeTarGz(t, map[string]string{"rgd.yaml": "kind: RGD\n"})
 	digest := "sha256:" + sha256Hex(data)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(data)
+		_, _ = w.Write(data)
 	}))
 	defer srv.Close()
 
@@ -64,7 +68,7 @@ func TestFetchSuccess(t *testing.T) {
 func TestFetchDigestMismatch(t *testing.T) {
 	data := makeTarGz(t, map[string]string{"x.txt": "x"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(data)
+		_, _ = w.Write(data)
 	}))
 	defer srv.Close()
 	dir := t.TempDir()
@@ -79,7 +83,7 @@ func TestFetchPathTraversal(t *testing.T) {
 	data := makeTarGz(t, map[string]string{"../escape": "no"})
 	digest := "sha256:" + sha256Hex(data)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(data)
+		_, _ = w.Write(data)
 	}))
 	defer srv.Close()
 	dir := t.TempDir()

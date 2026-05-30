@@ -59,15 +59,13 @@ func (a *Applier) Apply(ctx context.Context, obj *unstructured.Unstructured, own
 	if fieldMgr == "" {
 		fieldMgr = DefaultFieldOwner
 	}
-	opts := metav1.PatchOptions{FieldManager: fieldMgr, Force: ptrBool(force)}
+	opts := metav1.PatchOptions{FieldManager: fieldMgr, Force: &force}
 	out, err := iface.Patch(ctx, obj.GetName(), types.ApplyPatchType, data, opts)
 	if err != nil {
 		return nil, fmt.Errorf("apply %s/%s: %w", gvk.Kind, obj.GetName(), err)
 	}
 	return out, nil
 }
-
-func ptrBool(b bool) *bool { return &b }
 
 // Pruner deletes inventory entries no longer present in the new render.
 type Pruner struct {
