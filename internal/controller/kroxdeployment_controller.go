@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	srcv1 "github.com/fluxcd/source-controller/api/v1"
@@ -112,7 +113,15 @@ func (r *KroxDeploymentReconciler) reconcile(ctx context.Context, kd *v1alpha1.K
 	}
 
 	// 3. Read RGD file.
-	rgdData, err := os.ReadFile(filepath.Join(dir, filepath.Clean(kd.Spec.Path)))
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	rgdPath := filepath.Join(absDir, filepath.Clean(kd.Spec.Path))
+	if !strings.HasPrefix(rgdPath+string(os.PathSeparator), absDir+string(os.PathSeparator)) {
+		return r.terminal(ctx, kd, "PathTraversal", fmt.Errorf("spec.path %q escapes artifact root", kd.Spec.Path))
+	}
+	rgdData, err := os.ReadFile(rgdPath)
 	if err != nil {
 		return r.terminal(ctx, kd, "RGDNotFound", err)
 	}
